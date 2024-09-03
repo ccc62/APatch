@@ -49,7 +49,7 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-home-cache-cleanup: true
+          cache-cleanup: on-success
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -60,14 +60,17 @@ jobs:
         run: |
           rustup default stable
           rustup update stable
-          cargo install cargo-ndk
           rustup target install aarch64-linux-android
+          cargo install cargo-ndk
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apd
           cache-targets: false
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew  # 确保 gradlew 可执行
 
       - name: Build with Gradle
         run: |
@@ -76,7 +79,7 @@ jobs:
           echo 'org.gradle.jvmargs=-Xmx2048m' >> gradle.properties
           echo 'android.native.buildOutput=verbose' >> gradle.properties
           sed -i 's/org.gradle.configuration-cache=true//g' gradle.properties
-          ./gradlew clean assembleRelease
+          ./gradlew clean assembleRelease --stacktrace --info
           echo "BUILD_TOOL_VERSION=$(ls /usr/local/lib/android/sdk/build-tools/ | tail -n 1)" >> $GITHUB_ENV
 
       - name: Sign Release
@@ -93,31 +96,22 @@ jobs:
           keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
 
+      - name: Upload APK
+        if: ${{ always() }}
+        run: |
+          APK_PATH=$(ls -1 app/build/outputs/apk/release/*.apk | grep -v unsigned || true)
+          if [ -z "$APK_PATH" ]; then
+            echo "No signed APK found, uploading unsigned APK."
+            APK_PATH=$(ls -1 app/build/outputs/apk/release/*.apk | grep unsigned || true)
+          fi
+          echo "Uploading $APK_PATH"
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+
       - name: Upload build artifact
-        env: 
-           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        if: ${{ env.SIGNING_KEY != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: APatch
-          path: ${{steps.sign_app.outputs.signedReleaseFile}}
-
-      - name: Post to channel
-        if: ${{github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.ref_type != 'tag'}}
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-          COMMIT_URL: ${{ github.event.head_commit.url }}
-          COMMIT_ID: ${{ github.event.head_commit.id }}
-        run: |
-          if [ ! -z "${{ secrets.BOT_TOKEN }}" ]; then
-            OUTPUT="app/build/outputs/apk/release"
-            export Release=$(find $OUTPUT -name "*.apk")
-            URL=$(python3 .github/scripts/telegram_url.py -1002058433411)
-            curl -v "$URL" -F Release=@${{ steps.sign_app.outputs.signedReleaseFile }}
-            URL=$(python3 .github/scripts/telegram_url.py -1001910818234)
-            curl -v "$URL" -F Release=@${{ steps.sign_app.outputs.signedReleaseFile }}
-          fi
+          path: ${{ env.APK_PATH }}
 
       - name: Release apk
         env: 
@@ -126,9 +120,9 @@ jobs:
         continue-on-error: true
         uses: ncipollo/release-action@v1
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ steps.parse_version.outputs.VERSION }}
-          artifacts: ${{steps.sign_app.outputs.signedReleaseFile}}
+          artifacts: ${{ env.APK_PATH }}
           generateReleaseNotes: true
           makeLatest: true
           replacesArtifacts: true
